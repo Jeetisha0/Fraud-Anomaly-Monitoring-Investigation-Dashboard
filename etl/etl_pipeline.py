@@ -148,29 +148,23 @@ print("order_items aggregation complete:", order_items_agg.shape)
 # ======================================================
 #  3B — Aggregate payments
 # ======================================================
-
 print("\nAggregating payments...")
 
-# Assume payment_status column exists (adjust if different)
-if "payment_status" in payments.columns:
-
-    payments_agg = (
-        payments
-        .groupby("order_id")
-        .agg(
-            payment_fail_count_before_success=(
-                "payment_status",
-                lambda x: (x == "failed").sum()
-            ),
-            payment_method=("payment_method", "last")
-        )
-        .reset_index()
+payments_agg = (
+    payments
+    .groupby("order_id")
+    .agg(
+        payment_fail_count_before_success=(
+            "payment_status",
+            lambda x: (x == "failed").sum()
+        ),
+        payment_method=("payment_method", "last")  # keep final method
     )
-
-else:
-    payments_agg = payments.groupby("order_id").size().reset_index(name="payment_attempts")
+    .reset_index()
+)
 
 print("payments aggregation complete:", payments_agg.shape)
+
 
 # ======================================================
 #  3C — Device reuse count
@@ -190,3 +184,229 @@ if "device_id" in sessions.columns:
     sessions = sessions.merge(device_counts, on="device_id", how="left")
 
 print("Device reuse calculated.")
+
+# ======================================================
+#  4 — Build fact_orders_enriched
+# ======================================================
+
+print("\nBuilding fact_orders_enriched...")
+
+# Start from orders (base table)
+fact_orders = orders.copy()
+
+# -------------------------------
+# Join users
+# -------------------------------
+fact_orders = fact_orders.merge(
+    users,
+    on="user_id",
+    how="left"
+)
+
+# -------------------------------
+# Join sessions
+# -------------------------------
+fact_orders = fact_orders.merge(
+    sessions[["session_id", "device_id", "device_reuse_count"]],
+    on="session_id",
+    how="left"
+)
+
+# -------------------------------
+# Join shipments
+# -------------------------------
+fact_orders = fact_orders.merge(
+    shipments[["order_id"]],
+    on="order_id",
+    how="left"
+)
+
+# -------------------------------
+# Join refunds
+# -------------------------------
+fact_orders = fact_orders.merge(
+    refunds[["order_id"]],
+    on="order_id",
+    how="left",
+    indicator=True
+)
+
+# Create refund flag
+fact_orders["refund_flag"] = fact_orders["_merge"].apply(
+    lambda x: 1 if x == "both" else 0
+)
+
+fact_orders.drop(columns=["_merge"], inplace=True)
+
+# -------------------------------
+# Join coupons
+# -------------------------------
+fact_orders = fact_orders.merge(
+    coupons,
+    on="coupon_id",
+    how="left"
+)
+
+# -------------------------------
+# Join aggregated order_items
+# -------------------------------
+fact_orders = fact_orders.merge(
+    order_items_agg,
+    on="order_id",
+    how="left"
+)
+
+# -------------------------------
+# Join aggregated payments
+# -------------------------------
+fact_orders = fact_orders.merge(
+    payments_agg,
+    on="order_id",
+    how="left"
+)
+
+print("fact_orders_enriched built:", fact_orders.shape) 
+
+
+# -------------------------------
+# Monetary fields
+# -------------------------------
+
+if "gross_amount" not in fact_orders.columns:
+    if "order_amount" in fact_orders.columns:
+        fact_orders["gross_amount"] = fact_orders["order_amount"]
+
+if "discount_amount" not in fact_orders.columns:
+    fact_orders["discount_amount"] = 0
+
+fact_orders["net_amount"] = (
+    fact_orders["gross_amount"] - fact_orders["discount_amount"]
+)
+
+
+# -------------------------------
+# Derive shipping_city_tier (simple rule)
+# -------------------------------
+
+metro_pincodes = ["400", "110", "560", "600"]  # example prefixes
+
+fact_orders["shipping_city_tier"] = fact_orders["shipping_pincode"].astype(str).apply(
+    lambda x: "Tier 1" if any(x.startswith(prefix) for prefix in metro_pincodes) else "Tier 2/3"
+)
+
+print(fact_orders.head())
+print(fact_orders.shape)
+
+# --------------------------------------------------
+# Ensure ONE row per order (remove duplicates safely)
+# --------------------------------------------------
+
+fact_orders = fact_orders.sort_values("order_ts")
+
+fact_orders = fact_orders.drop_duplicates(
+    subset=["order_id"],
+    keep="last"
+)
+
+print("\nAfter removing duplicates:")
+print("Rows:", fact_orders.shape[0])
+print("Unique orders:", fact_orders["order_id"].nunique())
+
+# ======================================================
+# Step 5 — Risk Signals
+# ======================================================
+
+print("\nCreating risk signals...")
+
+# Calculate discount percentage
+fact_orders["coupon_discount_pct"] = (
+    fact_orders["discount_amount"] / fact_orders["gross_amount"]
+).fillna(0)
+
+fact_orders["high_discount_flag"] = (
+    fact_orders["coupon_discount_pct"] > 0.5
+).astype(int)
+
+# new user flag
+if "user_created_ts" in fact_orders.columns:
+
+    fact_orders["account_age_days"] = (
+        fact_orders["order_ts"] - fact_orders["user_created_ts"]
+    ).dt.days
+
+    fact_orders["new_user_flag"] = (
+        fact_orders["account_age_days"] <= 7
+    ).astype(int)
+else:
+    fact_orders["new_user_flag"] = 0
+
+print("\nColumns available in fact_orders:")
+print(fact_orders.columns.tolist())
+
+# Cash-on-Delivery (COD) Flag
+# Only create flag if payment_method exists
+
+if "payment_method" in fact_orders.columns:
+    fact_orders["cod_flag"] = (
+        fact_orders["payment_method"].str.lower() == "cod"
+    ).astype(int)
+else:
+    fact_orders["cod_flag"] = 0
+#late night order flag
+fact_orders["order_hour"] = fact_orders["order_ts"].dt.hour
+
+fact_orders["late_night_order_flag"] = (
+    (fact_orders["order_hour"] >= 0) &
+    (fact_orders["order_hour"] <= 5)
+).astype(int)
+
+#quantity outlier flag
+fact_orders["qty_outlier_flag"] = (
+    fact_orders["total_qty"] >
+    fact_orders["total_qty"].quantile(0.95)
+).astype(int)
+
+#pincode reuse count
+pincode_counts = (
+    fact_orders.groupby("shipping_pincode")["user_id"]
+    .nunique()
+    .reset_index(name="pincode_reuse_count")
+)
+
+fact_orders = fact_orders.merge(
+    pincode_counts,
+    on="shipping_pincode",
+    how="left"
+)
+
+#multi coupon user flag
+coupon_usage = (
+    fact_orders.groupby("user_id")["coupon_id"]
+    .nunique()
+    .reset_index(name="coupon_variety")
+)
+
+fact_orders = fact_orders.merge(
+    coupon_usage,
+    on="user_id",
+    how="left"
+)
+
+fact_orders["multi_coupon_user_flag"] = (
+    fact_orders["coupon_variety"] > 3
+).astype(int)
+
+# payment failure signal
+fact_orders["payment_fail_count_before_success"] = (
+    fact_orders["payment_fail_count_before_success"]
+    .fillna(0)
+)
+
+# order value Z-score by category
+fact_orders["order_value_zscore_by_category"] = (
+    fact_orders.groupby("top_category")["net_amount"]
+    .transform(lambda x: (x - x.mean()) / x.std())
+).fillna(0)
+
+print(fact_orders.columns.tolist())
+
