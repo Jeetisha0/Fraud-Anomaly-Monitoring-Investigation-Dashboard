@@ -472,4 +472,170 @@ def assign_risk_band(score):
 fact_orders["risk_band"] = fact_orders["risk_score"].apply(assign_risk_band)
 
 print("Risk scoring complete.")
-print(fact_orders[["risk_score","risk_band"]].head())
+
+
+# ======================================================
+# Step 7 — Create Investigation Queue
+# ======================================================
+
+print("\nBuilding investigation queue...")
+
+# ------------------------------------------------------
+# Define function to extract top 3 risk reasons
+# ------------------------------------------------------
+
+def get_risk_reasons(row):
+    reasons = []
+
+    if row["high_discount_flag"] == 1:
+        reasons.append("High discount usage")
+
+    if row["new_user_flag"] == 1:
+        reasons.append("New user account")
+
+    if row["cod_flag"] == 1:
+        reasons.append("Cash on delivery order")
+
+    if row["late_night_order_flag"] == 1:
+        reasons.append("Late night order")
+
+    if row["qty_outlier_flag"] == 1:
+        reasons.append("Unusual quantity")
+
+    if row["multi_coupon_user_flag"] == 1:
+        reasons.append("Multiple coupon usage")
+
+    if row["payment_fail_count_before_success"] > 2:
+        reasons.append("Multiple payment failures")
+
+    if row["device_reuse_count"] > 3:
+        reasons.append("Device reused across users")
+
+    if abs(row["order_value_zscore_by_category"]) > 2:
+        reasons.append("Order value anomaly")
+
+    return ", ".join(reasons[:3])  # Top 3 only
+
+
+fact_orders["top_3_risk_reasons"] = fact_orders.apply(get_risk_reasons, axis=1)
+
+
+# ------------------------------------------------------
+# Recommended Action Logic
+# ------------------------------------------------------
+
+def recommend_action(row):
+    if row["risk_band"] == "High":
+        return "Hold for manual review"
+    elif row["risk_band"] == "Medium":
+        return "Call verification"
+    else:
+        return "Auto process"
+
+fact_orders["recommended_action"] = fact_orders.apply(recommend_action, axis=1)
+
+
+# ------------------------------------------------------
+# Evidence Fields (What triggered risk)
+# ------------------------------------------------------
+
+fact_orders["evidence_fields"] = (
+    "discount_pct=" + fact_orders["coupon_discount_pct"].round(2).astype(str)
+    + "; payment_failures=" + fact_orders["payment_fail_count_before_success"].astype(str)
+    + "; device_reuse=" + fact_orders["device_reuse_count"].astype(str)
+    + "; total_qty=" + fact_orders["total_qty"].astype(str)
+)
+
+
+# ------------------------------------------------------
+# Final Investigation Queue Table
+# ------------------------------------------------------
+
+investigation_queue = fact_orders[
+    [
+        "order_id",
+        "risk_score",
+        "risk_band",
+        "top_3_risk_reasons",
+        "recommended_action",
+        "evidence_fields"
+    ]
+].sort_values("risk_score", ascending=False)
+
+
+print("Investigation queue created:", investigation_queue.shape)
+
+
+# ======================================================
+# Step 8 — Create fact_user_risk_weekly
+# ======================================================
+
+print("\nBuilding weekly user risk table...")
+
+# ------------------------------------------------------
+# Create week_start column
+# ------------------------------------------------------
+
+fact_orders["week_start"] = (
+    fact_orders["order_ts"]
+    .dt.to_period("W")
+    .apply(lambda r: r.start_time)
+)
+
+# ------------------------------------------------------
+# Aggregate weekly metrics
+# ------------------------------------------------------
+
+fact_user_risk_weekly = (
+    fact_orders
+    .groupby(["user_id", "week_start"])
+    .agg(
+        orders_count=("order_id", "count"),
+        net_revenue=("net_amount", "sum"),
+        refunds_count=("refund_flag", "sum"),
+        refund_amount=("discount_amount", "sum"),  # adjust if refund_amount column exists
+        coupon_orders_count=("coupon_id", lambda x: (x != "NO_COUPON").sum()),
+        avg_discount_pct=("coupon_discount_pct", "mean"),
+        cod_orders_count=("cod_flag", "sum"),
+        payment_failures_count=("payment_fail_count_before_success", "sum"),
+        risk_score_avg=("risk_score", "mean")
+    )
+    .reset_index()
+)
+
+# ------------------------------------------------------
+# RTO Count (if available in shipments)
+# ------------------------------------------------------
+
+if "shipment_status" in fact_orders.columns:
+    rto_counts = (
+        fact_orders
+        .groupby(["user_id", "week_start"])["shipment_status"]
+        .apply(lambda x: (x == "rto").sum())
+        .reset_index(name="rto_count")
+    )
+
+    fact_user_risk_weekly = fact_user_risk_weekly.merge(
+        rto_counts,
+        on=["user_id", "week_start"],
+        how="left"
+    )
+
+else:
+    fact_user_risk_weekly["rto_count"] = 0
+
+print("Weekly user risk table created:", fact_user_risk_weekly.shape)
+
+# ======================================================
+# Step 9 — Save Required Outputs
+# ======================================================
+
+OUTPUT_PATH = os.path.join(BASE_DIR, "data")
+
+os.makedirs(OUTPUT_PATH, exist_ok=True)
+
+fact_orders.to_csv(os.path.join(OUTPUT_PATH, "fact_orders_enriched.csv"), index=False)
+investigation_queue.to_csv(os.path.join(OUTPUT_PATH, "investigation_queue.csv"), index=False)
+fact_user_risk_weekly.to_csv(os.path.join(OUTPUT_PATH, "fact_user_risk_weekly.csv"),index=False)
+
+print("\nAll outputs saved successfully.")
