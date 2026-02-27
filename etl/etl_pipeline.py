@@ -410,3 +410,66 @@ fact_orders["order_value_zscore_by_category"] = (
 
 print(fact_orders.columns.tolist())
 
+# ======================================================
+# Step 6 — Risk Scoring System
+# ======================================================
+
+print("\nCalculating risk score...")
+
+# Initialize risk score
+fact_orders["risk_score"] = 0
+
+# ------------------------------------------------------
+# Add weighted signals
+# ------------------------------------------------------
+
+# High discount abuse
+fact_orders["risk_score"] += fact_orders["high_discount_flag"] * 15
+
+# New user risk
+fact_orders["risk_score"] += fact_orders["new_user_flag"] * 10
+
+# COD risk
+fact_orders["risk_score"] += fact_orders["cod_flag"] * 10
+
+# Late night behaviour
+fact_orders["risk_score"] += fact_orders["late_night_order_flag"] * 5
+
+# Quantity anomaly
+fact_orders["risk_score"] += fact_orders["qty_outlier_flag"] * 10
+
+# Device reuse
+fact_orders["risk_score"] += (
+    fact_orders["device_reuse_count"] > 3
+).astype(int) * 15
+
+# Payment failures
+fact_orders["risk_score"] += (
+    fact_orders["payment_fail_count_before_success"] > 2
+).astype(int) * 20
+
+# Multi coupon users
+fact_orders["risk_score"] += fact_orders["multi_coupon_user_flag"] * 10
+
+# Extreme order value anomaly
+fact_orders["risk_score"] += (
+    abs(fact_orders["order_value_zscore_by_category"]) > 2
+).astype(int) * 15
+
+
+# ------------------------------------------------------
+# Assign Risk Band
+# ------------------------------------------------------
+
+def assign_risk_band(score):
+    if score >= 60:
+        return "High"
+    elif score >= 30:
+        return "Medium"
+    else:
+        return "Low"
+
+fact_orders["risk_band"] = fact_orders["risk_score"].apply(assign_risk_band)
+
+print("Risk scoring complete.")
+print(fact_orders[["risk_score","risk_band"]].head())
