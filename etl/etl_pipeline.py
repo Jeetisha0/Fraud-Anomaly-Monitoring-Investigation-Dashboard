@@ -639,3 +639,67 @@ investigation_queue.to_csv(os.path.join(OUTPUT_PATH, "investigation_queue.csv"),
 fact_user_risk_weekly.to_csv(os.path.join(OUTPUT_PATH, "fact_user_risk_weekly.csv"),index=False)
 
 print("\nAll outputs saved successfully.")
+
+# ======================================================
+# PART - D
+# ======================================================
+fact_orders["risk_score"] = 0
+
+## Add Weighted Signals
+
+# Strong indicators
+fact_orders["risk_score"] += (fact_orders["payment_fail_count_before_success"] > 2).astype(int) * 20
+fact_orders["risk_score"] += (fact_orders["device_reuse_count"] > 3).astype(int) * 15
+fact_orders["risk_score"] += fact_orders["high_discount_flag"] * 15
+fact_orders["risk_score"] += (abs(fact_orders["order_value_zscore_by_category"]) > 2).astype(int) * 15
+
+# Medium indicators
+fact_orders["risk_score"] += fact_orders["new_user_flag"] * 10
+fact_orders["risk_score"] += fact_orders["cod_flag"] * 10
+
+# Mild indicators
+fact_orders["risk_score"] += fact_orders["qty_outlier_flag"] * 5
+fact_orders["risk_score"] += fact_orders["late_night_order_flag"] * 5
+fact_orders["risk_score"] += fact_orders["multi_coupon_user_flag"] * 5
+fact_orders["risk_score"] += (fact_orders["pincode_reuse_count"] > 5).astype(int) * 5
+
+## Risk bands
+def assign_risk_band(score):
+    if score >= 60:
+        return "High"
+    elif score >= 30:
+        return "Medium"
+    else:
+        return "Low"
+
+fact_orders["risk_band"] = fact_orders["risk_score"].apply(assign_risk_band)
+
+## Top 3 Drivers
+def get_top_drivers(row):
+    drivers = []
+
+    if row["payment_fail_count_before_success"] > 2:
+        drivers.append("Multiple payment failures")
+
+    if row["device_reuse_count"] > 3:
+        drivers.append("Device reuse")
+
+    if row["high_discount_flag"] == 1:
+        drivers.append("High discount")
+
+    if abs(row["order_value_zscore_by_category"]) > 2:
+        drivers.append("Order value anomaly")
+
+    if row["new_user_flag"] == 1:
+        drivers.append("New user")
+
+    if row["cod_flag"] == 1:
+        drivers.append("COD")
+
+    return ", ".join(drivers[:3])
+
+fact_orders["top_3_drivers"] = fact_orders.apply(get_top_drivers, axis=1)
+
+## Updates output
+fact_orders.to_csv("data/fact_orders_enriched.csv", index=False)
+
