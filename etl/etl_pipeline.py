@@ -461,15 +461,20 @@ fact_orders["risk_score"] += (
 # Assign Risk Band
 # ------------------------------------------------------
 
+# Percentile-based thresholds 
+high_threshold = fact_orders["risk_score"].quantile(0.90)
+medium_threshold = fact_orders["risk_score"].quantile(0.70)
+
 def assign_risk_band(score):
-    if score >= 60:
+    if score >= high_threshold:
         return "High"
-    elif score >= 30:
+    elif score >= medium_threshold:
         return "Medium"
     else:
         return "Low"
 
 fact_orders["risk_band"] = fact_orders["risk_score"].apply(assign_risk_band)
+
 
 print("Risk scoring complete.")
 
@@ -641,7 +646,7 @@ fact_user_risk_weekly.to_csv(os.path.join(OUTPUT_PATH, "fact_user_risk_weekly.cs
 print("\nAll outputs saved successfully.")
 
 # ======================================================
-# PART - D
+# Part D — Risk Scoring System
 # ======================================================
 fact_orders["risk_score"] = 0
 
@@ -664,10 +669,14 @@ fact_orders["risk_score"] += fact_orders["multi_coupon_user_flag"] * 5
 fact_orders["risk_score"] += (fact_orders["pincode_reuse_count"] > 5).astype(int) * 5
 
 ## Risk bands
+# Percentile-based thresholds 
+high_threshold = fact_orders["risk_score"].quantile(0.90)
+medium_threshold = fact_orders["risk_score"].quantile(0.70)
+
 def assign_risk_band(score):
-    if score >= 60:
+    if score >= high_threshold:
         return "High"
-    elif score >= 30:
+    elif score >= medium_threshold:
         return "Medium"
     else:
         return "Low"
