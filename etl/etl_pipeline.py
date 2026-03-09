@@ -324,7 +324,7 @@ fact_orders["coupon_discount_pct"] = (
 ).fillna(0)
 
 fact_orders["high_discount_flag"] = (
-    fact_orders["coupon_discount_pct"] > 0.5
+    fact_orders["coupon_discount_pct"] >= 0.30
 ).astype(int)
 
 # new user flag
@@ -352,12 +352,13 @@ if "payment_method" in fact_orders.columns:
     ).astype(int)
 else:
     fact_orders["cod_flag"] = 0
+
 #late night order flag
-fact_orders["order_hour"] = fact_orders["order_ts"].dt.hour
+# Extract hour from order timestamp
+fact_orders["order_hour"] = pd.to_datetime(fact_orders["order_ts"]).dt.hour
 
 fact_orders["late_night_order_flag"] = (
-    (fact_orders["order_hour"] >= 0) &
-    (fact_orders["order_hour"] <= 5)
+    (fact_orders["order_hour"] >= 23) | (fact_orders["order_hour"] <= 5)
 ).astype(int)
 
 #quantity outlier flag
@@ -460,21 +461,28 @@ fact_orders["risk_score"] += (
 # ------------------------------------------------------
 # Assign Risk Band
 # ------------------------------------------------------
+# ------------------------------------------------
+# Create Risk Bands using ranking (stable method)
+# ------------------------------------------------
 
-# Percentile-based thresholds 
-high_threshold = fact_orders["risk_score"].quantile(0.90)
-medium_threshold = fact_orders["risk_score"].quantile(0.70)
+# Rank orders by risk_score
+fact_orders["risk_rank"] = fact_orders["risk_score"].rank(method="first")
 
-def assign_risk_band(score):
-    if score >= high_threshold:
+# Total number of orders
+n = len(fact_orders)
+
+def assign_risk_band(rank):
+    if rank >= n * 0.80:
         return "High"
-    elif score >= medium_threshold:
+    elif rank >= n * 0.50:
         return "Medium"
     else:
         return "Low"
 
-fact_orders["risk_band"] = fact_orders["risk_score"].apply(assign_risk_band)
+fact_orders["risk_band"] = fact_orders["risk_rank"].apply(assign_risk_band)
 
+# Drop helper column
+fact_orders.drop(columns=["risk_rank"], inplace=True)
 
 print("Risk scoring complete.")
 
